@@ -1,0 +1,338 @@
+name: Build & release
+
+# Every 3 hours: look for new Telegram Desktop / tg-ws-proxy releases and,
+# if anything changed, build Client-tg for Windows and publish a release.
+# Installed clients pick releases up by themselves (sidecar/tgws_updater.py).
+
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild everything even if nothing changed'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - 'sidecar/**'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tdesktop_tag: ${{ steps.plan.outputs.tdesktop_tag }}
+      proxy_tag: ${{ steps.plan.outputs.proxy_tag }}
+      telegram_key: ${{ steps.plan.outputs.telegram_key }}
+      proxy_key: ${{ steps.plan.outputs.proxy_key }}
+      build_telegram: ${{ steps.plan.outputs.build_telegram }}
+      build_proxy: ${{ steps.plan.outputs.build_proxy }}
+      release: ${{ steps.plan.outputs.release }}
+      previous_tag: ${{ steps.plan.outputs.previous_tag }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compare upstream releases with our latest release
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Pull requests always build everything to prove it compiles.
+          FORCE: ${{ (github.event_name == 'pull_request' || inputs.force) && 'true' || 'false' }}
+        run: python3 scripts/plan.py
+
+  proxy:
+    needs: plan
+    if: needs.plan.outputs.build_proxy == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: client-tg
+
+      - name: Checkout tg-ws-proxy ${{ needs.plan.outputs.proxy_tag }}
+        uses: actions/checkout@v6
+        with:
+          repository: Flowseal/tg-ws-proxy
+          ref: ${{ needs.plan.outputs.proxy_tag }}
+          path: proxy-src
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Same as upstream: a bootloader built from source is flagged by
+      # antivirus software much less often than the prebuilt one.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install dependencies
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: '1'
+        run: |
+          pip install ./proxy-src
+          pip download --no-binary pyinstaller --no-deps --no-cache-dir -d pyinstaller_src "pyinstaller==6.10.0"
+          pip install (Get-ChildItem pyinstaller_src\*.tar.gz).FullName
+
+      - name: Unit tests
+        run: python -m unittest discover -s client-tg/sidecar/tests -v
+
+      - name: Build TgWsProxy.exe
+        env:
+          TGWS_PROXY_SRC: ${{ github.workspace }}/proxy-src
+        run: pyinstaller client-tg/sidecar/TgWsProxy.spec --noconfirm --distpath dist --workpath build
+
+      - name: Smoke test (proxy starts and listens)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\TgWsProxy.exe -PassThru -ArgumentList `
+            '--port','1444','--secret','0123456789abcdef0123456789abcdef','--log-file',"$PWD\smoke.log"
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 1
+            if (Get-NetTCPConnection -LocalPort 1444 -State Listen -ErrorAction SilentlyContinue) { $ok = $true; break }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Get-Content smoke.log -ErrorAction SilentlyContinue
+          if (-not $ok) { throw 'TgWsProxy.exe did not start listening on 1444' }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: proxy
+          path: dist/TgWsProxy.exe
+          if-no-files-found: error
+
+  # Building Qt and the other libraries takes hours on a cold cache, so it
+  # runs in its own job (each job may run up to 6 hours) and is cached.
+  libs:
+    needs: plan
+    if: needs.plan.outputs.build_telegram == 'true'
+    runs-on: windows-latest
+    env:
+      PREPARE_PATH: Telegram/build/prepare/prepare.py
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - &prepare-dirs
+        name: Prepare directories
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - &checkout-tdesktop
+        name: Checkout tdesktop ${{ needs.plan.outputs.tdesktop_tag }}
+        uses: actions/checkout@v6
+        with:
+          repository: telegramdesktop/tdesktop
+          ref: ${{ needs.plan.outputs.tdesktop_tag }}
+          submodules: recursive
+          path: TBuild/tdesktop
+
+      - &first-setup
+        name: First set up
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/tdesktop/docs/building-win.md
+          SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> $GITHUB_ENV
+          echo "$(sha256sum $TBUILD/tdesktop/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+          git config --global user.email "build@client-tg"
+          git config --global user.name "Client-tg build"
+
+      - &msvc
+        name: Native Tools Command Prompt
+        uses: Eden-CI/msvc-dev-cmd@master
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+
+      - &nuget
+        name: NuGet sources
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: ThirdParty cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.os }}-third-party-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.os }}-third-party-
+
+      - name: Libraries cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.LibrariesPath }}
+          key: ${{ runner.os }}-x64-qt6-libs-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.os }}-x64-qt6-libs-
+
+      - &libraries
+        name: Libraries
+        run: '%TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6'
+
+      - name: Free up some disk space
+        shell: bash
+        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+
+  telegram:
+    needs: [plan, libs]
+    runs-on: windows-latest
+    env:
+      PREPARE_PATH: Telegram/build/prepare/prepare.py
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - *prepare-dirs
+      - *checkout-tdesktop
+
+      - uses: actions/checkout@v6
+        with:
+          path: client-tg
+
+      - name: Apply Client-tg changes
+        run: python client-tg\client\apply.py %TBUILD%\tdesktop
+
+      - *first-setup
+      - *msvc
+      - *nuget
+
+      - name: Restore ThirdParty cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.os }}-third-party-${{ env.CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: Restore Libraries cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.LibrariesPath }}
+          key: ${{ runner.os }}-x64-qt6-libs-${{ env.CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - *libraries
+
+      - name: Build Telegram.exe
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: |
+          if "%TG_API_ID%"=="" (
+            rem Open credentials published by Telegram Desktop for its own CI builds.
+            set TG_API_ID=611335
+            set TG_API_HASH=d524b414d21f4d37f08684c1df41ac9c
+          )
+          cd %TBUILD%\tdesktop\Telegram
+          call configure.bat x64 qt6 ^
+            -D TDESKTOP_API_ID=%TG_API_ID% ^
+            -D TDESKTOP_API_HASH=%TG_API_HASH% ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+          if errorlevel 1 exit /b 1
+          cmake --build ..\out --config Release --parallel
+          if errorlevel 1 exit /b 1
+          mkdir %GITHUB_WORKSPACE%\artifact
+          copy %TBUILD%\tdesktop\out\Release\Telegram.exe %GITHUB_WORKSPACE%\artifact\
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: telegram
+          path: artifact/Telegram.exe
+          if-no-files-found: error
+
+  release:
+    needs: [plan, proxy, telegram]
+    if: >-
+      always() && github.event_name != 'pull_request'
+      && needs.plan.outputs.release == 'true'
+      && needs.plan.result == 'success'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download new builds
+        uses: actions/download-artifact@v8
+        with:
+          path: input
+          merge-multiple: true
+
+      - name: Reuse unchanged files from ${{ needs.plan.outputs.previous_tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS: ${{ needs.plan.outputs.previous_tag }}
+        run: |
+          mkdir -p input
+          for f in Telegram.exe TgWsProxy.exe; do
+            if [ ! -f "input/$f" ]; then
+              gh release download "$PREVIOUS" --pattern "$f" --dir input
+            fi
+          done
+          ls -la input
+
+      - name: Assemble release
+        env:
+          BUILD: ${{ github.run_number }}
+          TAG: b${{ github.run_number }}
+          TDESKTOP_TAG: ${{ needs.plan.outputs.tdesktop_tag }}
+          PROXY_TAG: ${{ needs.plan.outputs.proxy_tag }}
+          TELEGRAM_KEY: ${{ needs.plan.outputs.telegram_key }}
+          PROXY_KEY: ${{ needs.plan.outputs.proxy_key }}
+        run: python3 scripts/make_release.py input out
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: b${{ github.run_number }}
+          TDESKTOP_TAG: ${{ needs.plan.outputs.tdesktop_tag }}
+          PROXY_TAG: ${{ needs.plan.outputs.proxy_tag }}
+        run: |
+          gh release create "$TAG" out/* \
+            --target "$GITHUB_SHA" \
+            --latest \
+            --title "Telegram ${TDESKTOP_TAG#v} + TG WS Proxy ${PROXY_TAG#v} (сборка ${{ github.run_number }})" \
+            --notes "Telegram Desktop [${TDESKTOP_TAG}](https://github.com/telegramdesktop/tdesktop/releases/tag/${TDESKTOP_TAG}), TG WS Proxy [${PROXY_TAG}](https://github.com/Flowseal/tg-ws-proxy/releases/tag/${PROXY_TAG}).
+
+          Первая установка: скачайте Client-tg-windows-x64.zip, распакуйте в любую папку (не в Program Files) и запустите Telegram.exe. Дальше клиент обновляется сам."
+
+  # A scheduled build that breaks (for example, upstream changed code our
+  # changes hook into) opens an issue; clients keep the last good release.
+  report-failure:
+    needs: [plan, proxy, libs, telegram, release]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TDESKTOP_TAG: ${{ needs.plan.outputs.tdesktop_tag }}
+          PROXY_TAG: ${{ needs.plan.outputs.proxy_tag }}
+        run: |
+          title="Автосборка сломалась: Telegram ${TDESKTOP_TAG}, TG WS Proxy ${PROXY_TAG}"
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number' | grep -q .; then
+            echo "Issue already open"
+            exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+            --body "Сборка не прошла: $RUN_URL
+
+          Пользователи остаются на последнем удачном релизе."
