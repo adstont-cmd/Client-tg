@@ -124,13 +124,27 @@ jobs:
       run:
         shell: cmd
     steps:
+      # Debug + Release libraries do not fit into the free space of the
+      # runner's C: drive as is: drop big preinstalled SDKs we never use and
+      # build on whichever drive has more room.
       - &prepare-dirs
         name: Prepare directories
+        shell: pwsh
         run: |
-          mkdir %userprofile%\TBuild\Libraries
-          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
-          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
-          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+          foreach ($dir in 'C:\Android', 'C:\hostedtoolcache\windows\CodeQL',
+              'C:\hostedtoolcache\windows\go', 'C:\hostedtoolcache\windows\Ruby',
+              'C:\hostedtoolcache\windows\PyPy', 'C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk',
+              'C:\ghcup', 'C:\Program Files\MongoDB', 'C:\Program Files\R') {
+            if (Test-Path $dir) { cmd /c rmdir /s /q "$dir" }
+          }
+          Get-PSDrive C, D -ErrorAction SilentlyContinue | Format-Table Name, Used, Free
+          $root = Get-PSDrive C, D -ErrorAction SilentlyContinue |
+            Sort-Object Free -Descending | Select-Object -First 1
+          $tbuild = "$($root.Name):\TBuild"
+          New-Item -ItemType Directory -Force "$tbuild\Libraries" | Out-Null
+          cmd /c mklink /d "$env:GITHUB_WORKSPACE\TBuild" "$tbuild"
+          "TBUILD=$env:GITHUB_WORKSPACE\TBuild" >> $env:GITHUB_ENV
+          "LibrariesPath=$env:GITHUB_WORKSPACE\TBuild\Libraries\win64" >> $env:GITHUB_ENV
 
       - &checkout-tdesktop
         name: Checkout tdesktop ${{ needs.plan.outputs.tdesktop_tag }}
@@ -197,7 +211,9 @@ jobs:
       # Only drop intermediate build files. Pruning more (for
       # example generated .cpp sources of tdesktop_rust) breaks the build.
       - name: Free up some disk space
+        if: always()
         run: |
+          powershell -NoProfile -Command "Get-PSDrive C, D | Format-Table Name, Used, Free"
           cd %TBUILD%
           del /S /Q Libraries\*.pdb
           del /S /Q Libraries\*.pch
