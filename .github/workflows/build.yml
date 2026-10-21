@@ -151,6 +151,9 @@ jobs:
           # As upstream: no /Zi in Debug flags, otherwise parallel library
           # builds fail with C2471 (cannot update program database).
           sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+          # Breakpad's dump_syms (Release only) needs ATL, which this
+          # toolset lacks. It is a symbol tool we never use, skip it.
+          sed -i -E '/tools\\\\windows\\\\dump_syms|dump_syms\.(gyp|vcxproj)/d' $TBUILD/tdesktop/$PREPARE_PATH
           echo "$(sha256sum $TBUILD/tdesktop/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
           echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
