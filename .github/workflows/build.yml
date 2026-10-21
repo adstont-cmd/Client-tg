@@ -182,16 +182,21 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ env.LibrariesPath }}
-          key: ${{ runner.os }}-x64-qt6-libs-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.os }}-x64-qt6-libs-
+          key: ${{ runner.os }}-x64-qt6-libs-v2-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.os }}-x64-qt6-libs-v2-
 
       - &libraries
         name: Libraries
         run: '%TBUILD%\tdesktop\Telegram\build\prepare\win.bat skip-release silent qt6'
 
+      # As upstream: only drop intermediate build files. Pruning more (for
+      # example generated .cpp sources of tdesktop_rust) breaks the build.
       - name: Free up some disk space
-        shell: bash
-        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+        run: |
+          cd %TBUILD%
+          del /S /Q Libraries\*.pdb
+          del /S /Q Libraries\*.pch
+          del /S /Q Libraries\*.obj
 
   telegram:
     needs: [plan, libs]
@@ -227,7 +232,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.LibrariesPath }}
-          key: ${{ runner.os }}-x64-qt6-libs-${{ env.CACHE_KEY }}
+          key: ${{ runner.os }}-x64-qt6-libs-v2-${{ env.CACHE_KEY }}
           fail-on-cache-miss: true
 
       - *libraries
