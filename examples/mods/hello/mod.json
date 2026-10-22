@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "hello",
+  "version": "1.0.0",
+  "name": "Hello",
+  "description": "Пример мода: команды, правка исходящих сообщений, пункты меню и конфиг.",
+  "authors": ["Client-tg"],
+  "license": "MIT",
+  "apiVersion": "[1,2)",
+  "entrypoints": {
+    "windows": "hello.dll",
+    "macos": "libhello.dylib",
+    "linux": "libhello.so",
+    "android": "libhello.so"
+  },
+  "dependencies": [
+    { "id": "client", "versionRange": "[0.1,)" }
+  ]
+}

@@ -6,6 +6,8 @@ Telegram Desktop для Windows со встроенным [TG WS Proxy](https://
 - **Включение в один клик.** Внизу списка чатов есть круглая кнопка со щитом, как у прокси в самом Telegram. Синий щит означает, что прокси включён, серый — выключен. При первом запуске прокси включён, чтобы можно было войти в аккаунт.
 - **Обновления сами.** Каждые 3 часа GitHub Actions проверяет новые релизы [Telegram Desktop](https://github.com/telegramdesktop/tdesktop) и [TG WS Proxy](https://github.com/Flowseal/tg-ws-proxy). Если что-то вышло, собирается и публикуется новый релиз. Установленный клиент сам скачивает его: прокси обновляется сразу, а Telegram предлагает перезапуститься.
 
+- **Моды.** Встроен движок модов в духе Forge/NeoForge: моды лежат в папке `mods`, у каждого есть `mod.json`, зависимости, свои команды, пункты меню и подписки на события. Список модов открывается из главного меню, пункт «Моды». Подробности в [docs/modding.md](docs/modding.md).
+
 ## Установка
 
 1. Откройте [последний релиз](../../releases/latest) и скачайте `Client-tg-windows-x64.zip`.
@@ -20,6 +22,9 @@ Telegram Desktop для Windows со встроенным [TG WS Proxy](https://
 client/            изменения Telegram Desktop
   apply.py         встраивает их в исходники tdesktop перед сборкой
   src/tgws/        кнопка на главном экране и запуск прокси
+  src/modengine/   движок модов: загрузчик, шина событий, хуки, окно «Моды»
+modapi/include/tgmod/  API для авторов модов (tgmod.h и tgmod.hpp)
+examples/mods/hello/   пример мода
 sidecar/           TgWsProxy.exe: прокси Flowseal без трея + автообновление
   tgws_sidecar.py  точка входа
   tgws_updater.py  скачивает и устанавливает новые версии
