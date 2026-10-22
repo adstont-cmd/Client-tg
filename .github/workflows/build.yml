@@ -236,6 +236,15 @@ jobs:
         with:
           path: client-tg
 
+      # Parallel compilation with Telegram's huge precompiled header runs
+      # out of virtual memory (C3859/C1076) with the default page file.
+      - name: Enlarge page file
+        uses: al-cheb/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 32GB
+          disk-root: "C:"
+
       - name: Apply Client-tg changes
         run: python client-tg\client\apply.py %TBUILD%\tdesktop
 
